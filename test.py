@@ -9,6 +9,33 @@ import tkinter as tk
 from tkinter import font as tkfont
 
 
+class Cache:
+    data = {}
+    ws = None
+
+    def remove(self, request):
+        if request in self.data:
+            del self.data[request]
+
+    async def get_or_retrieve(self, request):
+        if request not in self.data:
+            try:
+                print('[%s] Requesting "%s" from server.' % (self.ws.remote_address[0], request))
+                await self.ws.send('data.request')
+                await self.ws.send(request)
+
+                resp = await self.ws.recv()
+            except:
+                resp = None
+
+            if resp:
+                self.data[request] = resp
+            else:
+                return None
+
+        return self.data[request]
+
+
 class Net:
     def __init__(self, address, nickname, frame=None):
         self.address = address
@@ -38,8 +65,13 @@ class Net:
         self.connect_status = 0
         self.tasks = []
 
+        self.cache = Cache()
+
     def set_frame(self, frame):
         self.frame = frame
+
+    def console_output(self, message):
+        print('[%s]: %s' % (self.cache.ws.remote_address[0], message))
 
     def connect(self):
         self.thread = threading.Thread(target=Net._asyncio_thread, args=(self, self.loop))
@@ -52,27 +84,30 @@ class Net:
                   'ws://%s' % self.address) as websocket:
                     self.connect_status = 1
 
+                    self.cache.ws = websocket
                     await websocket.send(self.nick)
 
                     while not websocket.closed:
                         try:
                             cmd = await websocket.recv()
                         except asyncio.CancelledError:
-                            print('oof')
-                            await websocket.close(reason='hyu')
-                            raise
+                            print('Waiting thread to kill itself...')
+                            await websocket.close(reason='bye')
+                            sys.exit(0)
 
-                        print(cmd)
+                        self.console_output(cmd)
 
                         if cmd == 'hs.players':
                             self.players = ast.literal_eval(await websocket.recv())
                             self.avatars = ast.literal_eval(await websocket.recv())
-                            self.frame.updatePlayers(self.format, self.avatars, self.players)
 
                         if cmd == 'hs.default':
                             dat = await websocket.recv()
                             self.frame.placeholder = tk.PhotoImage(data=dat)
+
+                        if cmd == 'hs.ended':
                             self.frame.placeholders()
+                            await self.frame.updatePlayers(self.format, self.cache, self.avatars, self.players)
 
                         if cmd == 'hs.you':
                             self.frame.playerid = int(await websocket.recv())
@@ -83,7 +118,7 @@ class Net:
                             print(dat)
                             self.players.append(dat[0])
                             self.avatars.append(dat[1])
-                            self.frame.updatePlayers(self.format, self.avatars, self.players)
+                            await self.frame.updatePlayers(self.format, self.cache, self.avatars, self.players)
 
                         if cmd == 'player.leave':
                             dat = int(await websocket.recv())
@@ -91,17 +126,14 @@ class Net:
                             del self.avatars[dat]
                             if self.frame.playerid > dat:
                                 self.frame.playerid -= 1
-                            self.frame.updatePlayers(self.format, self.avatars, self.players)
-
+                            await self.frame.updatePlayers(self.format, self.cache, self.avatars, self.players)
             except asyncio.CancelledError:
-                print('oof')
                 raise
             else:
                 self.connect_status = -1
 
         try:
-            self.tasks.append(loop.create_task(send()))
-            loop.run_forever()
+            loop.run_until_complete(send())
         except KeyboardInterrupt:
             pass
 
@@ -138,15 +170,34 @@ class MainWindow(tk.Tk):
         frame.grid(row=0, column=0)
         return frame
 
+    def on_closing(self):
+        self.show_frame('ClosingPage')
+        self.frames['ClosingPage'].update()
+
+        pending = asyncio.Task.all_tasks(loop=self.net.loop)
+        gathered = asyncio.gather(*pending, loop=self.net.loop)
+        try:
+            gathered.cancel()
+            self.net.loop.run_until_complete(gathered)
+
+            # we want to retrieve any exceptions to make sure that
+            # they don't nag us about it being un-retrieved.
+            gathered.exception()
+        except:
+            pass
+        finally:
+            sys.exit(0)
+
 
 class GamePage(tk.Frame):
-    def updatePlayers(self, f, images, names):
+    async def updatePlayers(self, f, cache, images, names):
         self.placeholders()
 
         fmt = f[len(names)-1]
         for i in range(len(names)):
             a = self.avatars[fmt[i]]
-            a.avatar = tk.PhotoImage(data=images[i])
+            img = await cache.get_or_retrieve(images[i])
+            a.avatar = tk.PhotoImage(data=img)
             a.nickname = names[i]
             a.upd()
 
@@ -268,11 +319,11 @@ class MainPage(tk.Frame):
                     pass
 
                 if self.controller.net.connect_status == 1:
-                    print('nice')
+                    print('Connection successful!')
                     self.controller.show_frame("GamePage")
                     self.controller.net.frame = self.controller.frames["GamePage"]
                 else:
-                    print('whoops')
+                    print('Connection to %s failed...' % self.e2.get())
                     self.b.configure(text='Упс...')
                     self.controller.net.connect_status = 0
 
@@ -299,22 +350,8 @@ class ClosingPage(tk.Frame):
         label.pack()
 
 
-def on_closing():
-    app.wait_visibility(app.show_frame('ClosingPage'))
-
-    loop = asyncio.get_event_loop()
-    loop.stop()
-
-    pending = asyncio.Task.all_tasks(loop=loop)
-    gathered = asyncio.gather(*pending, loop=loop)
-    gathered.cancel()
-
-    sys.exit(0)
-
-
-
 if __name__ == "__main__":
     app = MainWindow()
     flags = []
-    app.protocol("WM_DELETE_WINDOW", on_closing)
+    app.protocol("WM_DELETE_WINDOW", app.on_closing)
     app.mainloop()

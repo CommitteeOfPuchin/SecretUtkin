@@ -6,9 +6,11 @@ from aioconsole import ainput
 
 wss = {}
 
+
 async def wakeup():
 	while True:
 		await asyncio.sleep(1)
+
 
 async def con():
 	while True:
@@ -29,32 +31,35 @@ async def con():
 def avaGen(websocket):
 	data = [a[1] for a in wss.values()]
 	if wss[websocket][1].startswith('K'):
-		data = ['T_Unknown.png' if not x.startswith('K') else x for x in data]
+		data = ['T_Unknown' if not x.startswith('K') else x for x in data]
 
 	else:
-		data = ['T_Unknown.png' if x != wss[websocket][1] else x for x in data]
+		data = ['T_Unknown' if x != wss[websocket][1] else x for x in data]
 
-	for i, path in enumerate(data):
-		with open('Cards/%s' % path, "rb") as image_file:
-			data[i] = base64.b64encode(image_file.read())
 	return data
 
 
+def console_output(ws, message):
+	print('[%s]: %s' % (ws.remote_address[0], message))
+
+
 async def hello(websocket, path):
-	print('%s connected' % websocket.remote_address[0])
+	console_output(websocket, 'Client connected.')
 	
 	if len(wss) == 10:
 		websocket.close()
 		return
 		
-	wss[websocket] = (await websocket.recv(), "T_Unknown.png")
-	print(wss)
+	wss[websocket] = (await websocket.recv(), "T_Unknown")
+	console_output(websocket, 'Client nickname is "%s".' % wss[websocket][0])
+	print('[Debug]: %s' % repr(wss))
 		
 	await websocket.send('hs.default')
 	await asyncio.sleep(0.1)
-	await websocket.send(T_Placeholder)
+	with open('Cards/T_Placeholder.png', "rb") as image_file:
+		await websocket.send(base64.b64encode(image_file.read()))
 	await asyncio.sleep(0.1)
-	print(1)
+	console_output(websocket, 'Client got default data.')
 
 	await websocket.send('hs.you')
 	await asyncio.sleep(0.1)
@@ -71,40 +76,44 @@ async def hello(websocket, path):
 			continue
 
 		await ws.send('player.join')
-		await ws.send(repr([wss[websocket][0], T_Unknown]))
+		await ws.send(repr([wss[websocket][0], 'T_Unknown']))
 		await asyncio.sleep(0.1)
-	print(2)
+	console_output(websocket, 'Client sent to the others')
 
-	closed = False
-	while not closed:
-		await websocket.wait_closed()
-		closed = websocket.closed
+	await websocket.send('hs.ended')
 
-	print('%s disconnected' % websocket.remote_address[0])
-	print('Reason: %s' % websocket.close_reason)
+	try:
+		while websocket.open:
+			cmd = await websocket.recv()
 
-	for ws in wss.keys():
-		if ws == websocket:
-			continue
-		await ws.send('player.leave')
-		await asyncio.sleep(0.1)
-		await ws.send(str(list(wss.keys()).index(websocket)))
-	print(3)
+			if cmd == "data.request":
+				path = await websocket.recv()
+				try:
+					with open('Cards/%s.png' % path, "rb") as image_file:
+						await websocket.send(base64.b64encode(image_file.read()))
+				except:
+					await websocket.send('')
+	except websockets.exceptions.ConnectionClosed:
+		console_output(websocket, 'Client disconnected. Reason: "%s"' % websocket.close_reason)
 
-	del wss[websocket]
+		for ws in wss.keys():
+			if ws == websocket:
+				continue
+			await ws.send('player.leave')
+			await asyncio.sleep(0.1)
+			await ws.send(str(list(wss.keys()).index(websocket)))
+		console_output(websocket, 'Client purged from others.')
 
-	print(wss)
+		del wss[websocket]
+
+		print('[Debug]: %s' % wss)
+	else:
+		pass
 
 start_server = websockets.serve(hello, '0.0.0.0', 6999)
 asyncio.get_event_loop().run_until_complete(start_server)
 asyncio.get_event_loop().create_task(wakeup())
 asyncio.get_event_loop().create_task(con())
-
-with open('Cards/T_Placeholder.png', "rb") as image_file:
-	T_Placeholder = base64.b64encode(image_file.read())
-
-with open('Cards/T_Unknown.png', "rb") as image_file:
-	T_Unknown = base64.b64encode(image_file.read())
 
 try:
 	asyncio.get_event_loop().run_forever()
